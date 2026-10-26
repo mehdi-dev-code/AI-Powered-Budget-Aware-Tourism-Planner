@@ -9,10 +9,12 @@ Neutral message format used by the agent:
     {"role": "tool",  "name": "...", "result": {...}}
 """
 import os
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = "gemini-3.8-flash"        # on Google's free tier; override with GEMINI_MODEL in .env
+RETRY_DELAYS = (2, 5, 10)                 # seconds to wait before each retry when Google is busy
 
 
 class LLMError(Exception):
@@ -80,6 +82,29 @@ class GeminiLLM:
         self._types = types
         self.client = genai.Client(api_key=self.api_key)
 
+    def _generate(self, contents, config, sleep=time.sleep):
+        """Call Gemini, retrying a few times when Google reports it is busy (503/500/overloaded)."""
+        for attempt in range(len(RETRY_DELAYS) + 1):
+            try:
+                return self.client.models.generate_content(model=self.model, contents=contents, config=config)
+            except Exception as exc:
+                text = str(exc)
+                busy = any(x in text for x in ("503", "UNAVAILABLE", "500", "INTERNAL", "overloaded", "high demand"))
+                if busy and attempt < len(RETRY_DELAYS):
+                    sleep(RETRY_DELAYS[attempt])
+                    continue
+                if busy:
+                    raise LLMError("Gemini is overloaded right now (Google-side). Wait a minute and send the message "
+                                   "again, or set GEMINI_MODEL in .env to another free model.") from exc
+                if "429" in text or "RESOURCE_EXHAUSTED" in text:
+                    raise LLMError("Gemini rate limit reached (free tier). Wait a minute and try again.") from exc
+                if "404" in text or "NOT_FOUND" in text:
+                    raise LLMError(f"Gemini does not know the model '{self.model}'. Set GEMINI_MODEL in .env to a model "
+                                   "listed in AI Studio.") from exc
+                if "API key" in text or "401" in text or "403" in text or "PERMISSION_DENIED" in text:
+                    raise LLMError("Gemini rejected the API key. Check GEMINI_API_KEY in .env.") from exc
+                raise LLMError(f"Gemini request failed: {text[:300]}") from exc
+
     def step(self, system, messages, tools):
         """One model turn. Returns {"text", "calls", "raw"}; function calls are returned, not executed."""
         t = self._types
@@ -88,19 +113,7 @@ class GeminiLLM:
         config = t.GenerateContentConfig(
             system_instruction=system, tools=[t.Tool(function_declarations=declarations)], temperature=0.2,
             automatic_function_calling=t.AutomaticFunctionCallingConfig(disable=True))   # our loop runs the tools
-        try:
-            response = self.client.models.generate_content(model=self.model, contents=_to_contents(messages, t),
-                                                           config=config)
-        except Exception as exc:
-            text = str(exc)
-            if "429" in text or "RESOURCE_EXHAUSTED" in text:
-                raise LLMError("Gemini rate limit reached (free tier). Wait a minute and try again.") from exc
-            if "404" in text or "NOT_FOUND" in text:
-                raise LLMError(f"Gemini does not know the model '{self.model}'. Set GEMINI_MODEL in .env to a model "
-                               "listed in AI Studio.") from exc
-            if "API key" in text or "401" in text or "403" in text or "PERMISSION_DENIED" in text:
-                raise LLMError("Gemini rejected the API key. Check GEMINI_API_KEY in .env.") from exc
-            raise LLMError(f"Gemini request failed: {text[:300]}") from exc
+        response = self._generate(_to_contents(messages, t), config)
         candidate = response.candidates[0] if getattr(response, "candidates", None) else None
         content = getattr(candidate, "content", None)
         parts = getattr(content, "parts", None) or []

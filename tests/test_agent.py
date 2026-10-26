@@ -154,3 +154,44 @@ def test_messages_convert_to_gemini_contents():
     assert contents[1] is raw                                   # Gemini's own turn is reused untouched
     assert contents[2][0] == "tool" and len(contents[2][1]) == 2  # both results in one turn
     assert contents[3] == ("model", [("text", "done")])
+
+
+class _FlakyClient:
+    def __init__(self, failures, error="503 UNAVAILABLE. high demand"):
+        self.calls, self.failures, self.error = 0, failures, error
+        self.models = SimpleNamespace(generate_content=self._gen)
+
+    def _gen(self, model, contents, config):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise RuntimeError(self.error)
+        return "OK"
+
+
+def _bare_llm(client):
+    llm = object.__new__(GeminiLLM)
+    llm.client, llm.model = client, "m"
+    return llm
+
+
+def test_busy_gemini_is_retried_then_succeeds():
+    client = _FlakyClient(failures=2)
+    assert _bare_llm(client)._generate([], None, sleep=lambda s: None) == "OK" and client.calls == 3
+
+
+def test_busy_gemini_gives_a_friendly_error_after_retries():
+    client = _FlakyClient(failures=99)
+    try:
+        _bare_llm(client)._generate([], None, sleep=lambda s: None)
+        assert False, "should have raised"
+    except LLMError as exc:
+        assert "overloaded" in str(exc) and client.calls == 4
+
+
+def test_other_errors_are_not_retried():
+    client = _FlakyClient(failures=99, error="403 PERMISSION_DENIED")
+    try:
+        _bare_llm(client)._generate([], None, sleep=lambda s: None)
+        assert False, "should have raised"
+    except LLMError as exc:
+        assert "API key" in str(exc) and client.calls == 1
