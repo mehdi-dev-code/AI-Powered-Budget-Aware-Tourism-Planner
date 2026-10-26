@@ -1,6 +1,6 @@
-# AI-Powered Budget-Aware Tourism Planner — Week 4: Data & Backend Foundation
+# AI-Powered Budget-Aware Tourism Planner
 
-A budget-aware trip planner for northern Pakistan (Hunza, Skardu, Gilgit). This Week 4 version is the data and backend foundation that the Week 5 AI agents will build on.
+A budget-aware trip planner for northern Pakistan (Hunza, Skardu, Gilgit). It has a data and backend foundation plus a Gemini-powered trip assistant.
 
 ## What is implemented
 - Sample hotel and transport datasets (`data/*.csv`), with prices in PKR.
@@ -10,10 +10,11 @@ A budget-aware trip planner for northern Pakistan (Hunza, Skardu, Gilgit). This 
 - Data-access functions: hotel search, transport lookup (direct and one-stop connections), saving trips.
 - Rule-based planner: validates input, picks a hotel that fits the budget (then the best preference match, then the lowest price) and warns when a preference had to be dropped, and builds an itemized cost estimate with a budget check. When transport data is missing it shows a partial estimate, and the budget check is not treated as conclusive.
 - Streamlit interface: trip planner, hotel database, transport data and saved trips tabs. The result stays on screen when inputs change. A plan is saved only when you press "Save this plan". Saved times are shown in Pakistan time (PKT, UTC+5); the database stores UTC.
-- Automated tests (`pytest`).
+- Trip assistant (Gemini): chat tab where an LLM calls four tools (`list_destinations`, `find_hotels`, `find_transport`, `plan_trip`) over the same database and planner. The model does no arithmetic; the plan shown is the planner's own result. Replies are checked for prices not returned by a tool, hotel names not in the database and booking claims. Code: `backend/tools.py`, `backend/llm.py` (only file that knows Gemini), `backend/agent.py`.
+- Automated tests (`pytest`), including agent tests that use a scripted fake model (no key or network needed).
 
 ## Not implemented yet
-- AI agents or an LLM (planned for Week 5).
+- Several specialised agents, RAG or embeddings, live research. The assistant is a single tool-calling agent.
 - Live hotel or transport APIs, and verified partner data.
 - Travel dates. Trip length is entered as a number of nights; dates for seasonal prices, weather and hotel availability are planned for a later version.
 - Login for the Admin refresh panel (it is open in this prototype).
@@ -29,6 +30,7 @@ Hotel names, contacts, rates, availability and transport fares are illustrative 
 ## Run locally
 1. Install Python 3.10 or newer.
 2. `pip install -r requirements.txt`
+3. For the assistant: create a key at https://aistudio.google.com/apikey, copy `.env.example` to `.env` and put the key in it. The `.env` file is ignored by git.
 3. `streamlit run app.py`
 4. Run the tests with `pytest` (or `python -m pytest`).
 5. After editing the CSV files, run `python refresh_data.py` to update the database.

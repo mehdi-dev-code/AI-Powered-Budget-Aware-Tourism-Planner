@@ -3,15 +3,17 @@ import pandas as pd
 from backend.database import (initialize_database, search_hotels, list_cities, list_origin_cities, refresh_data,
                               describe_rejection, list_trips, delete_trip, DATA_DIR)
 from backend.planner import build_budget_plan, save_plan, summarize_trip
+from backend.agent import run_agent
+from backend.llm import GeminiLLM, LLMError, api_key_available
 
 st.set_page_config(page_title="Budget Tourism Planner", page_icon="🧭", layout="wide")
 initialize_database()
 st.title("🧭 AI-Powered Budget-Aware Tourism Planner")
-st.caption("Week 4 prototype • Data & backend foundation • Rule-based baseline (AI agents are planned for Week 5)")
+st.caption("Prototype • Rule-based planner plus a Gemini-powered trip assistant that can only use the local database")
 st.warning("Demo only: hotel records, contacts, fares and availability are illustrative sample data—not verified live offers.")
 
 
-def show_plan(result):
+def show_plan(result, key="plan"):
     """Render a plan stored in session state, so it survives widget changes."""
     st.caption(f"Plan shown: {result['origin']} → {result['destination']}, {result['nights']} night(s), "
                f"{result['group_size']} traveler(s), budget PKR {result['budget']:,.0f}"
@@ -49,7 +51,7 @@ def show_plan(result):
     st.info(result["notice"])
     if result.get("saved_trip_id"):
         st.success(f"Plan saved as trip #{result['saved_trip_id']}. See the Saved trips tab.")
-    elif st.button("Save this plan"):
+    elif st.button("Save this plan", key=f"save_{key}"):
         result["saved_trip_id"] = save_plan(result)
         st.success(f"Plan saved as trip #{result['saved_trip_id']}. See the Saved trips tab.")
 
@@ -70,7 +72,7 @@ if create:
     except Exception as exc:
         st.session_state["plan"] = {"error": f"Could not build plan: {exc}"}
 
-tab1, tab2, tab3, tab4 = st.tabs(["Trip planner", "Hotel database", "Transport data", "Saved trips"])
+tab1, tab_ai, tab2, tab3, tab4 = st.tabs(["Trip planner", "Trip assistant (AI)", "Hotel database", "Transport data", "Saved trips"])
 with tab1:
     st.subheader("Budget-aware planning baseline")
     st.write("Enter trip details in the sidebar, then generate a transparent itemized estimate from the local sample database.")
@@ -84,6 +86,49 @@ with tab1:
         show_plan(plan)
     st.markdown("#### Current supported sample destinations")
     st.write(" • ".join(list_cities()))
+
+with tab_ai:
+    st.subheader("Trip assistant (Gemini)")
+    st.caption("Describe your trip in your own words. The assistant looks up hotels and fares in the local database and uses the "
+               "planner for every number. It cannot book anything.")
+    if not api_key_available():
+        st.info("Add your Gemini key to a `.env` file (GEMINI_API_KEY=...) and restart the app to enable the assistant.")
+    st.session_state.setdefault("chat", [])
+    st.session_state.setdefault("agent_history", [])
+    for m in st.session_state["chat"]:
+        with st.chat_message(m["role"]):
+            st.markdown(m["text"])
+            for w in m.get("warnings", []):
+                st.warning(w)
+    prompt = st.chat_input("e.g. 2 nights in Hunza from Islamabad for 2 people, budget 60,000 PKR")
+    if prompt:
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        st.session_state["chat"].append({"role": "user", "text": prompt})
+        with st.chat_message("assistant"):
+            try:
+                with st.spinner("Looking up the database..."):
+                    out = run_agent(prompt, st.session_state["agent_history"], llm=GeminiLLM())
+                st.session_state["agent_history"] = out["history"]
+                st.markdown(out["reply"])
+                for w in out["warnings"]:
+                    st.warning(w)
+                st.session_state["chat"].append({"role": "assistant", "text": out["reply"], "warnings": out["warnings"]})
+                if out["plan"]:
+                    st.session_state["agent_plan"] = out["plan"]
+                    st.session_state["agent_steps"] = out["steps"]
+            except LLMError as exc:
+                st.error(str(exc))
+    if st.session_state.get("agent_plan"):
+        st.markdown("#### Latest plan from the assistant")
+        show_plan(st.session_state["agent_plan"], key="assistant")
+        with st.expander("What the assistant looked up"):
+            for s in st.session_state.get("agent_steps", []):
+                st.write(f"`{s['tool']}`", s["args"])
+    if st.session_state["chat"] and st.button("Clear conversation"):
+        for k in ("chat", "agent_history", "agent_plan", "agent_steps"):
+            st.session_state.pop(k, None)
+        st.rerun()
 
 with tab2:
     st.subheader("Local hotel database")
@@ -125,7 +170,7 @@ with st.expander("Admin: refresh data from CSV files (prototype, no login)"):
             for line, why in r["rejected"]:
                 st.warning(f"{table} — {describe_rejection(line, why)}")
 
-with st.expander("Week 4 implementation status"):
+with st.expander("Implementation status"):
     st.markdown("""
     **Included in this prototype**
     - CSV seed datasets for sample hotels and transport
@@ -136,10 +181,11 @@ with st.expander("Week 4 implementation status"):
     - Budget-first hotel choice, partial-estimate handling and an itemized cost estimate
     - Plans are saved only when you choose to, and listed in the Saved trips tab
     - Basic Streamlit interface to demonstrate data/backend access
+    - Gemini trip assistant: tool calling over the same database and planner, with checks on prices, hotel names and booking claims
 
     **Not implemented yet**
     - Live hotel/transport APIs or verified partner availability
-    - LLM integration, AI agents, RAG or embeddings (Week 5)
+    - Multiple specialised agents, RAG or embeddings, live research
     - Travel dates, online booking and payments
     - Production authentication (the Admin panel has no login), deployment, or real customer data
     """)
