@@ -1,4 +1,5 @@
 """SQLite data-access layer for the tourism planner prototype."""
+from datetime import date, datetime
 from pathlib import Path
 import sqlite3
 import pandas as pd
@@ -7,8 +8,34 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 DB_PATH = ROOT / "tourism_planner.db"
 
-HOTEL_COLUMNS = ["id", "name", "city", "area", "price_per_night", "facilities", "contact", "availability", "updated_at"]
-TRANSPORT_COLUMNS = ["id", "mode", "from_city", "to_city", "fare_per_person", "duration_hours", "notes", "updated_at"]
+# How far a record can be trusted. Listed from most to least reliable.
+CONFIDENCE_LEVELS = ["Verified", "Needs reconfirmation", "Estimated", "Unknown"]
+PROTECTED_SOURCES = ("owner", "admin")   # rows maintained inside the app are never overwritten or pruned by CSV refresh
+STALE_DAYS = 60            # a "Verified" record older than this is shown as "Needs reconfirmation"
+
+HOTEL_COLUMNS = ["id", "name", "city", "area", "price_per_night", "facilities", "contact", "availability", "updated_at",
+                 "confidence", "last_verified", "source"]
+TRANSPORT_COLUMNS = ["id", "mode", "from_city", "to_city", "fare_per_person", "duration_hours", "notes", "updated_at",
+                     "confidence", "last_verified", "source"]
+
+
+def effective_confidence(confidence, last_verified=None, today=None):
+    """The label to show for a record. Missing labels are Unknown; a Verified record with no date or an old date
+    (more than STALE_DAYS) is shown as Needs reconfirmation."""
+    label = confidence if confidence in CONFIDENCE_LEVELS else "Unknown"
+    if label != "Verified":
+        return label
+    try:
+        checked = datetime.strptime(str(last_verified)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return "Needs reconfirmation"
+    return "Verified" if ((today or date.today()) - checked).days <= STALE_DAYS else "Needs reconfirmation"
+
+
+def weakest_confidence(labels):
+    """The least reliable of several labels (a plan is only as trustworthy as its weakest part)."""
+    labels = [l if l in CONFIDENCE_LEVELS else "Unknown" for l in labels]
+    return max(labels, key=CONFIDENCE_LEVELS.index) if labels else "Unknown"
 
 
 def get_connection():
@@ -18,7 +45,8 @@ def get_connection():
 
 
 # ---------------------------------------------------------------- validation
-def _validate(df, *, required_cols, text_cols, city_cols, required_text, nonneg_cols, positive_cols, date_cols, dup_keys):
+def _validate(df, *, required_cols, text_cols, city_cols, required_text, nonneg_cols, positive_cols, date_cols, dup_keys,
+              choice_cols=None):
     """Clean and validate rows. Returns (clean_df, rejected) where rejected is a list of (csv_line, reason).
 
     A rejection with line 0 describes the whole file (for example a missing required column).
@@ -41,6 +69,12 @@ def _validate(df, *, required_cols, text_cols, city_cols, required_text, nonneg_
         df[col] = df[col].str.title()
     for col in required_text:
         reject(df[col].isna(), f"missing {col}")
+    for col, allowed in (choice_cols or {}).items():       # e.g. confidence: must be one of the known labels
+        if col in df.columns:
+            canonical = {a.lower(): a for a in allowed}
+            lowered = df[col].astype("string").str.lower()
+            reject(lowered.notna() & ~lowered.isin(list(canonical)), f"invalid {col} (use one of: {', '.join(allowed)})")
+            df[col] = lowered.map(canonical).astype(object).where(lowered.notna(), None)
 
     if "id" in df.columns:
         ids = pd.to_numeric(df["id"], errors="coerce")
@@ -78,17 +112,19 @@ def _validate(df, *, required_cols, text_cols, city_cols, required_text, nonneg_
 
 def clean_hotels(df):
     return _validate(df, required_cols=["id", "name", "city", "price_per_night"],
-                     text_cols=["name", "city", "area", "facilities", "contact", "availability"],
+                     text_cols=["name", "city", "area", "facilities", "contact", "availability", "confidence", "source"],
                      city_cols=["city"], required_text=["name", "city"], nonneg_cols=["price_per_night"],
-                     positive_cols=[], date_cols=["updated_at"], dup_keys=["name", "city"])
+                     positive_cols=[], date_cols=["updated_at", "last_verified"], dup_keys=["name", "city"],
+                     choice_cols={"confidence": CONFIDENCE_LEVELS})
 
 
 def clean_transport(df):
     return _validate(df, required_cols=["id", "mode", "from_city", "to_city", "fare_per_person"],
-                     text_cols=["mode", "from_city", "to_city", "notes"], city_cols=["from_city", "to_city"],
+                     text_cols=["mode", "from_city", "to_city", "notes", "confidence", "source"],
+                     city_cols=["from_city", "to_city"],
                      required_text=["mode", "from_city", "to_city"], nonneg_cols=["fare_per_person"],
-                     positive_cols=["duration_hours"], date_cols=["updated_at"],
-                     dup_keys=["mode", "from_city", "to_city"])
+                     positive_cols=["duration_hours"], date_cols=["updated_at", "last_verified"],
+                     dup_keys=["mode", "from_city", "to_city"], choice_cols={"confidence": CONFIDENCE_LEVELS})
 
 
 # ---------------------------------------------------------------- schema + loading
@@ -103,7 +139,10 @@ def _create_tables(conn):
             facilities TEXT,
             contact TEXT,
             availability TEXT,
-            updated_at TEXT
+            updated_at TEXT,
+            confidence TEXT,
+            last_verified TEXT,
+            source TEXT
         )
     """)
     conn.execute("""
@@ -115,7 +154,10 @@ def _create_tables(conn):
             fare_per_person REAL NOT NULL CHECK(fare_per_person >= 0),
             duration_hours REAL CHECK(duration_hours IS NULL OR duration_hours > 0),
             notes TEXT,
-            updated_at TEXT
+            updated_at TEXT,
+            confidence TEXT,
+            last_verified TEXT,
+            source TEXT
         )
     """)
     conn.execute("""
@@ -133,6 +175,15 @@ def _create_tables(conn):
     """)
 
 
+def _migrate_columns(conn):
+    """Databases created before the confidence labels existed get the new columns (existing rows stay Unknown)."""
+    for table in ("hotels", "transport"):
+        have = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col in ("confidence", "last_verified", "source"):
+            if col not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} TEXT")
+
+
 def _py(value):
     return None if pd.isna(value) else (value.item() if hasattr(value, "item") else value)
 
@@ -140,12 +191,15 @@ def _py(value):
 def _sync_table(conn, table, columns, df, prune):
     """Insert new rows and update changed rows (matched by id). Optionally remove rows missing from the CSV."""
     existing = {r["id"]: dict(r) for r in conn.execute(f"SELECT * FROM {table}")}
-    added = updated = unchanged = 0
+    added = updated = unchanged = protected = 0
     placeholders = ", ".join("?" for _ in columns)
     assignments = ", ".join(f"{c}=excluded.{c}" for c in columns if c != "id")
     for _, row in df.iterrows():
         values = {c: _py(row[c]) if c in df.columns else None for c in columns}
         old = existing.get(values["id"])
+        if old is not None and old.get("source") in PROTECTED_SOURCES:   # app-managed rows are never overwritten by the CSV
+            protected += 1
+            continue
         if old is None:
             added += 1
         elif any(old[c] != values[c] for c in columns):
@@ -158,14 +212,14 @@ def _sync_table(conn, table, columns, df, prune):
     removed = 0
     if prune and len(df):
         keep = set(int(i) for i in df["id"])
-        stale = [i for i in existing if i not in keep]
+        stale = [i for i, row in existing.items() if i not in keep and row.get("source") not in PROTECTED_SOURCES]
         conn.executemany(f"DELETE FROM {table} WHERE id=?", [(i,) for i in stale])
         removed = len(stale)
-    return {"added": added, "updated": updated, "unchanged": unchanged, "removed": removed}
+    return {"added": added, "updated": updated, "unchanged": unchanged, "removed": removed, "protected": protected}
 
 
 def _load_csv(conn, table, columns, csv_name, cleaner, prune):
-    nothing = {"added": 0, "updated": 0, "unchanged": 0, "removed": 0}
+    nothing = {"added": 0, "updated": 0, "unchanged": 0, "removed": 0, "protected": 0}
     try:
         raw = pd.read_csv(DATA_DIR / csv_name)
     except FileNotFoundError:
@@ -186,6 +240,7 @@ def initialize_database(reset=False):
         DB_PATH.unlink()
     conn = get_connection()
     _create_tables(conn)
+    _migrate_columns(conn)
     report = {}
     if conn.execute("SELECT COUNT(*) FROM hotels").fetchone()[0] == 0:
         report["hotels"] = _load_csv(conn, "hotels", HOTEL_COLUMNS, "hotels_sample.csv", clean_hotels, False)
@@ -221,8 +276,9 @@ def describe_rejection(line, why):
 def format_refresh_report(report):
     lines = []
     for table, r in report.items():
+        extra = f", {r['protected']} kept (owner-managed)" if r.get("protected") else ""
         lines.append(f"{table}: {r['added']} added, {r['updated']} updated, {r['unchanged']} unchanged, "
-                     f"{r['removed']} removed, {len(r['rejected'])} rejected")
+                     f"{r['removed']} removed, {len(r['rejected'])} rejected{extra}")
         lines += [f"  - {describe_rejection(line, why)}" for line, why in r["rejected"]]
     return "\n".join(lines)
 
@@ -284,7 +340,9 @@ def get_connecting_options(origin, destination):
         """SELECT a.to_city AS via, a.mode AS first_mode, b.mode AS second_mode,
                   a.fare_per_person + b.fare_per_person AS fare_per_person,
                   CASE WHEN a.duration_hours IS NULL OR b.duration_hours IS NULL THEN NULL
-                       ELSE a.duration_hours + b.duration_hours END AS duration_hours
+                       ELSE a.duration_hours + b.duration_hours END AS duration_hours,
+                  a.confidence AS first_confidence, a.last_verified AS first_verified,
+                  b.confidence AS second_confidence, b.last_verified AS second_verified
            FROM transport a JOIN transport b ON lower(a.to_city) = lower(b.from_city)
            WHERE lower(a.from_city)=lower(?) AND lower(b.to_city)=lower(?)
              AND lower(a.to_city) NOT IN (lower(?), lower(?))
@@ -297,6 +355,12 @@ def get_connecting_options(origin, destination):
         option = dict(r)
         option["mode"] = f"Connecting route via {option['via']} ({option['first_mode']} + {option['second_mode']})"
         option["connecting"] = True
+        # A connection is only as reliable as its weaker leg, and only as fresh as its older leg.
+        legs = [(option.pop("first_confidence"), option.pop("first_verified")),
+                (option.pop("second_confidence"), option.pop("second_verified"))]
+        option["confidence"] = weakest_confidence([effective_confidence(c, v) for c, v in legs])
+        dates = [v for _, v in legs]
+        option["last_verified"] = None if None in dates else min(dates)
         options.append(option)
     return options
 

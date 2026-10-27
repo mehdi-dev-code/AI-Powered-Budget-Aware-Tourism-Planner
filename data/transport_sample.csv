@@ -1,8 +1,8 @@
-id,mode,from_city,to_city,fare_per_person,duration_hours,notes,updated_at
-1,Bus / coach estimate,Islamabad,Gilgit,5000,15,"Illustrative estimate; verify route, schedule and fare",2026-10-20
-2,Bus / coach estimate,Islamabad,Skardu,5500,16,"Illustrative estimate; verify route, schedule and fare",2026-10-20
-3,Bus / coach estimate,Islamabad,Hunza,6000,18,"Illustrative estimate; verify route, schedule and fare",2026-10-20
-4,Shared local transport estimate,Gilgit,Hunza,1500,3,Illustrative estimate; verify locally,2026-10-20
-5,Shared local transport estimate,Gilgit,Skardu,2500,5,Illustrative estimate; verify locally,2026-10-20
-6,Shared local transport estimate,Hunza,Gilgit,1500,3,Illustrative estimate; verify locally,2026-10-20
-7,Shared local transport estimate,Skardu,Gilgit,2500,5,Illustrative estimate; verify locally,2026-10-20
+id,mode,from_city,to_city,fare_per_person,duration_hours,notes,updated_at,confidence,last_verified,source
+1,Bus / coach estimate,Islamabad,Gilgit,5000,15,"Illustrative estimate; verify route, schedule and fare",2026-10-20,Estimated,,sample data
+2,Bus / coach estimate,Islamabad,Skardu,5500,16,"Illustrative estimate; verify route, schedule and fare",2026-10-20,Estimated,,sample data
+3,Bus / coach estimate,Islamabad,Hunza,6000,18,"Illustrative estimate; verify route, schedule and fare",2026-10-20,Estimated,,sample data
+4,Shared local transport estimate,Gilgit,Hunza,1500,3,Illustrative estimate; verify locally,2026-10-20,Estimated,,sample data
+5,Shared local transport estimate,Gilgit,Skardu,2500,5,Illustrative estimate; verify locally,2026-10-20,Estimated,,sample data
+6,Shared local transport estimate,Hunza,Gilgit,1500,3,Illustrative estimate; verify locally,2026-10-20,Estimated,,sample data
+7,Shared local transport estimate,Skardu,Gilgit,2500,5,Illustrative estimate; verify locally,2026-10-20,Estimated,,sample data

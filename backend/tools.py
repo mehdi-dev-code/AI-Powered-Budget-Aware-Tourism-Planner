@@ -6,10 +6,17 @@ tool that books, pays or contacts a hotel.
 """
 import json
 from .database import (list_cities, list_origin_cities, search_hotels, get_transport_options,
-                       get_connecting_options)
+                       get_connecting_options, effective_confidence)
 from .planner import build_budget_plan
 
-HOTEL_FIELDS = ("name", "city", "area", "price_per_night", "facilities", "availability", "updated_at")
+HOTEL_FIELDS = ("name", "city", "area", "price_per_night", "facilities", "availability", "updated_at",
+                "last_verified", "source")
+
+
+def _with_confidence(record):
+    """Replace the stored label by the label to show (Verified / Needs reconfirmation / Estimated / Unknown)."""
+    record["confidence"] = effective_confidence(record.get("confidence"), record.get("last_verified"))
+    return record
 
 
 def list_destinations():
@@ -22,7 +29,7 @@ def find_hotels(city, max_nightly_price=None):
     rows = search_hotels(city, max_nightly_price)
     if not rows:
         return {"city": city, "hotels": [], "note": f"No hotel data for {city}. Supported: {', '.join(list_cities())}."}
-    return {"city": city, "hotels": [{k: h.get(k) for k in HOTEL_FIELDS} for h in rows]}
+    return {"city": city, "hotels": [_with_confidence({k: h.get(k) for k in HOTEL_FIELDS + ("confidence",)}) for h in rows]}
 
 
 def find_transport(origin, destination):
@@ -35,9 +42,9 @@ def find_transport(origin, destination):
     if not options:
         return {"origin": origin, "destination": destination, "options": [],
                 "note": "No transport data for this route. Do not guess a fare."}
-    keep = ("mode", "fare_per_person", "duration_hours", "via", "notes")
+    keep = ("mode", "fare_per_person", "duration_hours", "via", "notes", "last_verified", "confidence")
     return {"origin": origin, "destination": destination, "connecting": connecting,
-            "options": [{k: o.get(k) for k in keep if o.get(k) is not None} for o in options]}
+            "options": [_with_confidence({k: o.get(k) for k in keep if o.get(k) is not None}) for o in options]}
 
 
 def plan_trip(origin, destination, budget, nights, group_size, preferences=""):

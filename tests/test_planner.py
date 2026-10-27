@@ -201,7 +201,7 @@ def test_refresh_applies_csv_edits(temp_env):
     csv = temp_env / "hotels_sample.csv"
     df = pd.read_csv(csv)
     df.loc[df["id"] == 1, "price_per_night"] = 9999                  # price change
-    df.loc[len(df)] = [7, "New Hunza Inn", "Hunza", "Aliabad", 2800, "Wi-Fi", "0300-0000000", "Open", "2026-10-22"]
+    df.loc[len(df)] = [7, "New Hunza Inn", "Hunza", "Aliabad", 2800, "Wi-Fi", "0300-0000000", "Open", "2026-10-22", "Estimated", "", "test"]
     df.to_csv(csv, index=False)
     assert all(h["price_per_night"] != 9999 for h in search_hotels("Hunza"))   # not applied automatically
     report = refresh_data()

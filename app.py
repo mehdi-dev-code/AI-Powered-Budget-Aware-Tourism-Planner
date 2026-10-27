@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
 from backend.database import (initialize_database, search_hotels, list_cities, list_origin_cities, refresh_data,
-                              describe_rejection, list_trips, delete_trip, DATA_DIR)
+                              describe_rejection, list_trips, delete_trip, effective_confidence, CONFIDENCE_LEVELS,
+                              DATA_DIR)
 from backend.planner import build_budget_plan, save_plan, summarize_trip
 from backend.agent import run_agent
+from backend.owners import (admin_password_configured, check_admin_password, create_hotel, create_owner, delete_owner,
+                            get_owner_hotel, list_owners, update_own_hotel, verify_owner)
 from backend.llm import GeminiLLM, LLMError, api_key_available
 
 st.set_page_config(page_title="Budget Tourism Planner", page_icon="🧭", layout="wide")
@@ -35,6 +38,11 @@ def show_plan(result, key="plan"):
             st.error("This sample estimate exceeds the budget. Try a higher budget, fewer nights, or fewer travelers.")
     else:
         st.info("Budget check is not conclusive: transportation cost is missing. Add it before deciding if the trip fits the budget.")
+    conf = result.get("data_confidence", {})
+    overall = conf.get("overall", "Unknown")
+    detail = f"hotel: {conf.get('hotel', 'Unknown')}" + (f", transport: {conf['transport']}" if conf.get("transport") else "")
+    message = f"**Data confidence: {overall}** ({detail}). Food and activity costs are fixed assumptions."
+    (st.success if overall == "Verified" else st.warning if overall == "Needs reconfirmation" else st.info)(message)
     st.markdown("#### Selected accommodation")
     st.write(f"**{result['hotel']['name']}** — {result['hotel']['city']}, {result['hotel']['area']}")
     st.write(f"PKR {result['hotel']['price_per_night']:,.0f} per night • {result['hotel']['facilities']} • {result['rooms']} room(s)")
@@ -72,7 +80,8 @@ if create:
     except Exception as exc:
         st.session_state["plan"] = {"error": f"Could not build plan: {exc}"}
 
-tab1, tab_ai, tab2, tab3, tab4 = st.tabs(["Trip planner", "Trip assistant (AI)", "Hotel database", "Transport data", "Saved trips"])
+tab1, tab_ai, tab2, tab3, tab4, tab_owner = st.tabs(["Trip planner", "Trip assistant (AI)", "Hotel database", "Transport data",
+                                                      "Saved trips", "For hotel owners"])
 with tab1:
     st.subheader("Budget-aware planning baseline")
     st.write("Enter trip details in the sidebar, then generate a transparent itemized estimate from the local sample database.")
@@ -137,7 +146,11 @@ with tab2:
     rows = search_hotels(city, max_price)
     if rows:
         df = pd.DataFrame(rows)
-        st.dataframe(df[["name", "city", "area", "price_per_night", "facilities", "contact", "availability", "updated_at"]], hide_index=True, width="stretch")
+        df["confidence"] = [effective_confidence(c, v) for c, v in zip(df["confidence"], df["last_verified"])]
+        st.dataframe(df[["name", "city", "area", "price_per_night", "facilities", "contact", "availability", "confidence",
+                         "last_verified", "source", "updated_at"]], hide_index=True, width="stretch")
+        st.caption("Confidence: " + " > ".join(CONFIDENCE_LEVELS) + f". A Verified record older than 60 days is shown as "
+                   "Needs reconfirmation.")
     else:
         st.info("No hotels match this filter.")
     st.caption("Contacts and availability are placeholders for demonstration and must be replaced with participating hotel data.")
@@ -160,15 +173,133 @@ with tab4:
             delete_trip(to_delete)
             st.rerun()
 
-with st.expander("Admin: refresh data from CSV files (prototype, no login)"):
-    st.write("After editing `data/hotels_sample.csv` or `data/transport_sample.csv`, apply the changes to the database here. Saved trips are never changed.")
-    prune = st.checkbox("Also remove records that are no longer in the CSV files")
-    if st.button("Refresh data now"):
-        report = refresh_data(prune=prune)
-        for table, r in report.items():
-            st.write(f"**{table}**: {r['added']} added, {r['updated']} updated, {r['unchanged']} unchanged, {r['removed']} removed, {len(r['rejected'])} rejected")
-            for line, why in r["rejected"]:
-                st.warning(f"{table} — {describe_rejection(line, why)}")
+MAX_LOGIN_FAILURES = 5          # per browser session; restart the app to reset
+
+
+def failed_too_often(key):
+    return st.session_state.get(key, 0) >= MAX_LOGIN_FAILURES
+
+
+with tab_owner:
+    st.subheader("Hotel owner area")
+    st.caption("Log in to update your own hotel's price, facilities and availability. A saved update is marked Verified "
+               "with today's date and appears in plans and in the assistant straight away. Logins are created by the project admin.")
+    owner = st.session_state.get("owner")
+    if st.session_state.get("owner_message"):
+        st.success(st.session_state.pop("owner_message"))
+    if not owner:
+        with st.form("owner_login"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Log in")
+        if submitted:
+            if failed_too_often("owner_failures"):
+                st.error("Too many wrong attempts in this session. Restart the app to try again.")
+            else:
+                found = verify_owner(username, password)
+                if found:
+                    st.session_state["owner"] = found
+                    st.session_state["owner_failures"] = 0
+                    st.rerun()
+                st.session_state["owner_failures"] = st.session_state.get("owner_failures", 0) + 1
+                st.error("Wrong username or password.")
+    else:
+        hotel = get_owner_hotel(owner["id"])
+        st.write(f"Logged in as **{owner['username']}**: {hotel['name']}, {hotel['city']}")
+        st.caption(f"Current record: confidence {effective_confidence(hotel['confidence'], hotel['last_verified'])}, "
+                   f"last verified {hotel['last_verified'] or 'never'}.")
+        with st.form("owner_edit"):
+            price = st.number_input("Price per room per night (PKR)", min_value=0, max_value=500000,
+                                    value=int(hotel["price_per_night"]), step=100)
+            facilities = st.text_input("Facilities (separate with ;)", value=hotel["facilities"] or "")
+            availability = st.text_input("Availability", value=hotel["availability"] or "")
+            contact = st.text_input("Contact", value=hotel["contact"] or "")
+            area = st.text_input("Area", value=hotel["area"] or "")
+            saved = st.form_submit_button("Save and confirm these details", type="primary")
+        if saved:
+            try:
+                update_own_hotel(owner["id"], price, facilities, availability, contact, area)
+                st.session_state["owner_message"] = "Saved. Your hotel is now marked Verified as of today."
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+        if st.button("Log out"):
+            st.session_state.pop("owner", None)
+            st.rerun()
+
+with st.expander("Admin (password required)"):
+    if not admin_password_configured():
+        st.info("Admin tools are locked. Add ADMIN_PASSWORD=your-password to the .env file and restart the app.")
+    elif not st.session_state.get("is_admin"):
+        admin_pw = st.text_input("Admin password", type="password", key="admin_pw")
+        if st.button("Unlock admin tools"):
+            if failed_too_often("admin_failures"):
+                st.error("Too many wrong attempts in this session. Restart the app to try again.")
+            elif check_admin_password(admin_pw):
+                st.session_state["is_admin"] = True
+                st.session_state["admin_failures"] = 0
+                st.rerun()
+            else:
+                st.session_state["admin_failures"] = st.session_state.get("admin_failures", 0) + 1
+                st.error("Wrong password.")
+    else:
+        if st.button("Lock admin tools"):
+            st.session_state["is_admin"] = False
+            st.rerun()
+        st.markdown("##### Refresh data from CSV files")
+        st.write("After editing `data/hotels_sample.csv` or `data/transport_sample.csv`, apply the changes to the database here. "
+                 "Saved trips and hotels maintained in the app (owner or admin) are never changed.")
+        prune = st.checkbox("Also remove records that are no longer in the CSV files")
+        if st.button("Refresh data now"):
+            report = refresh_data(prune=prune)
+            for table, r in report.items():
+                st.write(f"**{table}**: {r['added']} added, {r['updated']} updated, {r['unchanged']} unchanged, "
+                         f"{r['removed']} removed, {len(r['rejected'])} rejected, {r.get('protected', 0)} kept (app-managed)")
+                for line, why in r["rejected"]:
+                    st.warning(f"{table} — {describe_rejection(line, why)}")
+
+        st.markdown("##### Add a hotel")
+        with st.form("add_hotel", clear_on_submit=True):
+            h_name = st.text_input("Hotel name")
+            h_city = st.selectbox("City", list_cities())
+            h_area = st.text_input("Area")
+            h_price = st.number_input("Price per room per night (PKR)", min_value=0, max_value=500000, value=4000, step=100)
+            h_fac = st.text_input("Facilities (separate with ;)")
+            h_contact = st.text_input("Contact")
+            h_avail = st.text_input("Availability")
+            if st.form_submit_button("Add hotel"):
+                try:
+                    new_id = create_hotel(h_name, h_city, h_area, h_price, h_fac, h_contact, h_avail)
+                    st.success(f"Hotel added with id {new_id}. It stays 'Unknown' until its owner confirms the details.")
+                except ValueError as exc:
+                    st.error(str(exc))
+
+        st.markdown("##### Owner logins")
+        owners = list_owners()
+        if owners:
+            st.dataframe(pd.DataFrame(owners)[["id", "username", "hotel", "city", "created_at"]], hide_index=True, width="stretch")
+        taken = {o["hotel_id"] for o in owners}
+        free = [h for city_name in list_cities() for h in search_hotels(city_name) if h["id"] not in taken]
+        if free:
+            with st.form("add_owner", clear_on_submit=True):
+                labels = {h["id"]: f"{h['name']} ({h['city']})" for h in free}
+                o_hotel = st.selectbox("Hotel", list(labels), format_func=labels.get)
+                o_user = st.text_input("Username")
+                o_pass = st.text_input("Password (at least 8 characters)", type="password")
+                if st.form_submit_button("Create owner login"):
+                    try:
+                        create_owner(o_user, o_pass, o_hotel)
+                        st.success(f"Login '{o_user}' created for {labels[o_hotel]}. Give the password to the owner privately.")
+                    except ValueError as exc:
+                        st.error(str(exc))
+        else:
+            st.caption("Every hotel already has an owner login.")
+        if owners:
+            names = {o["id"]: f"{o['username']} ({o['hotel']})" for o in owners}
+            to_remove = st.selectbox("Remove a login", list(names), format_func=names.get)
+            if st.button("Remove selected login"):
+                delete_owner(to_remove)
+                st.rerun()
 
 with st.expander("Implementation status"):
     st.markdown("""
@@ -181,11 +312,12 @@ with st.expander("Implementation status"):
     - Budget-first hotel choice, partial-estimate handling and an itemized cost estimate
     - Plans are saved only when you choose to, and listed in the Saved trips tab
     - Basic Streamlit interface to demonstrate data/backend access
+    - Confidence labels on every hotel and fare, a hotel-owner login to update your own hotel, and a password-protected admin area
     - Gemini trip assistant: tool calling over the same database and planner, with checks on prices, hotel names and booking claims
 
     **Not implemented yet**
     - Live hotel/transport APIs or verified partner availability
     - Multiple specialised agents, RAG or embeddings, live research
     - Travel dates, online booking and payments
-    - Production authentication (the Admin panel has no login), deployment, or real customer data
+    - Production-grade authentication (logins are basic, with no password reset), deployment, or real customer data
     """)

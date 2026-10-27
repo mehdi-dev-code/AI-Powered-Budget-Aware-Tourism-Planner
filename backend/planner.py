@@ -4,7 +4,7 @@ import math
 import re
 from datetime import datetime, timedelta, timezone
 from .database import (search_hotels, get_transport_options, get_connecting_options, save_trip,
-                       list_cities)
+                       list_cities, effective_confidence, weakest_confidence)
 
 # Cost assumptions (PKR). They are illustrative and stated on screen so the estimate stays transparent.
 PEOPLE_PER_ROOM = 2
@@ -98,6 +98,15 @@ def build_budget_plan(origin, destination, budget, nights, group_size, preferenc
     hotel_total = hotel_cost(hotel)
     total = hotel_total + other_costs
 
+    # How far the prices used can be trusted: a plan is only as reliable as its weakest data record.
+    hotel_conf = effective_confidence(hotel.get("confidence"), hotel.get("last_verified"))
+    transport_conf = (effective_confidence(transport_option.get("confidence"), transport_option.get("last_verified"))
+                      if transport_option else None)
+    overall_conf = weakest_confidence([hotel_conf] + ([transport_conf] if transport_conf else []))
+    if overall_conf != "Verified":
+        warnings.append(f"Data confidence is '{overall_conf}': confirm the hotel and transport prices before you rely on "
+                        "this estimate. Food and activity costs are fixed assumptions.")
+
     # Budget check. A missing cost can only raise the total, so "over budget" stays conclusive,
     # but "within budget" is NOT conclusive while transport is unknown.
     partial = transport_option is None
@@ -128,6 +137,7 @@ def build_budget_plan(origin, destination, budget, nights, group_size, preferenc
         "partial": partial,
         "budget_status": budget_status,
         "within_budget": {"within": True, "over": False}.get(budget_status),   # None = cannot be confirmed
+        "data_confidence": {"hotel": hotel_conf, "transport": transport_conf, "overall": overall_conf},
         "preferences": preferences,
         "unmet_preferences": unmet,
         "warnings": warnings,
@@ -141,7 +151,8 @@ def build_budget_plan(origin, destination, budget, nights, group_size, preferenc
 def save_plan(result):
     """Store a plan the user chose to keep. Returns the saved trip id."""
     payload = {"hotel": result["hotel"]["name"], "total_estimate": result["total_estimate"],
-               "budget_status": result["budget_status"], "partial": result["partial"], "costs": result["costs"]}
+               "budget_status": result["budget_status"], "partial": result["partial"], "costs": result["costs"],
+               "data_confidence": result["data_confidence"]["overall"]}
     return save_trip(result["destination"], result["origin"], result["budget"], result["nights"],
                      result["group_size"], result["preferences"], json.dumps(payload))
 
@@ -173,4 +184,5 @@ def summarize_trip(row):
             "From": row["origin"], "To": row["destination"],
             "Nights": row["nights"], "Travelers": row["group_size"], "Budget (PKR)": round(row["budget"]),
             "Estimated total (PKR)": round(total), "Hotel": data.get("hotel", ""),
-            "Budget check": data.get("budget_status", ""), "Preferences": row["preferences"] or ""}
+            "Budget check": data.get("budget_status", ""), "Data confidence": data.get("data_confidence", ""),
+            "Preferences": row["preferences"] or ""}
