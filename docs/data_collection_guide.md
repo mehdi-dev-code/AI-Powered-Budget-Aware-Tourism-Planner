@@ -13,3 +13,14 @@ date), calls or WhatsApp messages to hotels, and transport company ticket office
 
 Confidence labels: **Verified** (you confirmed it directly), **Needs reconfirmation** (older or indirect source), **Estimated**
 (rough figure), **Unknown** (cannot check). A Verified row older than 60 days is shown as Needs reconfirmation automatically.
+
+## Starting cities
+The app offers these starting cities: Islamabad, Rawalpindi, Lahore, Karachi, Faisalabad, Multan, Peshawar, Quetta, Hyderabad,
+Gujranwala, Sialkot, Bahawalpur, Sargodha, Sukkur and Abbottabad (list in `backend/database.py`, `MAJOR_CITIES`). A city with no
+fare data still works but gives a *partial estimate* (transport not included). To complete it, add transport rows:
+
+- One row per city to Islamabad (for example Lahore to Islamabad). The planner chains it with Islamabad to Hunza, Skardu or
+  Gilgit, adds the fares, and says it is a connection.
+- If a direct long-distance service exists (for example Lahore to Gilgit), add it as its own row. A direct row is preferred.
+- Many northern services may leave from Rawalpindi rather than Islamabad. Add Rawalpindi routes if that is what you find.
+- Do not copy a fare from one city to another. Leave the city without data until you have a real source.

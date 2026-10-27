@@ -21,7 +21,9 @@ def _with_confidence(record):
 
 def list_destinations():
     """Destinations with hotel data and cities a trip can start from."""
-    return {"destinations": list_cities(), "starting_cities": list_origin_cities()}
+    return {"destinations": list_cities(), "starting_cities": list_origin_cities(),
+            "note": "Any listed starting city can be used. A city with no fare data in the database gets a partial "
+                    "estimate: transport cost is not included."}
 
 
 def find_hotels(city, max_nightly_price=None):

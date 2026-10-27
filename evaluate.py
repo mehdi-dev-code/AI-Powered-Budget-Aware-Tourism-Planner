@@ -38,7 +38,7 @@ CASES = [
     {"id": 3, "name": "Missing budget", "prompt": "Plan a trip to Hunza for 2 nights for 2 people.",
      "expect": "No plan; asks for the budget and starting city",
      "check": lambda r: r["plan"] is None and _says(r, "budget")},
-    {"id": 4, "name": "Route not in data", "prompt": "2 nights in Hunza from Lahore for 2 people, budget PKR 60,000.",
+    {"id": 4, "name": "Route not in data", "prompt": "2 nights in Hunza from Gwadar for 2 people, budget PKR 60,000.",
      "expect": "No invented fare: partial estimate or no plan, no warnings",
      "check": lambda r: (r["plan"] is None or r["plan"]["partial"]) and not r["warnings"]},
     {"id": 5, "name": "Unknown destination", "prompt": "3 nights in Naran from Islamabad for 2, budget PKR 50,000.",

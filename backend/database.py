@@ -10,6 +10,10 @@ DB_PATH = ROOT / "tourism_planner.db"
 
 # How far a record can be trusted. Listed from most to least reliable.
 CONFIDENCE_LEVELS = ["Verified", "Needs reconfirmation", "Estimated", "Unknown"]
+# Big Pakistani cities a traveller may start from. They are always offered as starting cities; a plan from a city
+# that has no fare data yet is shown as a partial estimate (transport not included) until a route is added.
+MAJOR_CITIES = ["Islamabad", "Rawalpindi", "Lahore", "Karachi", "Faisalabad", "Multan", "Peshawar", "Quetta",
+                "Hyderabad", "Gujranwala", "Sialkot", "Bahawalpur", "Sargodha", "Sukkur", "Abbottabad"]
 PROTECTED_SOURCES = ("owner", "admin")   # rows maintained inside the app are never overwritten or pruned by CSV refresh
 STALE_DAYS = 60            # a "Verified" record older than this is shown as "Needs reconfirmation"
 
@@ -294,13 +298,19 @@ def list_cities():
 
 
 def list_origin_cities():
-    """Cities a trip can start from: every city that has a transport route or a hotel record."""
+    """Cities a trip can start from: the big cities, plus every city with a transport route or a hotel record."""
     initialize_database()
     conn = get_connection()
-    rows = conn.execute("""SELECT from_city AS c FROM transport UNION SELECT city FROM hotels
-                           ORDER BY c""").fetchall()
+    rows = conn.execute("""SELECT from_city AS c FROM transport UNION SELECT city FROM hotels""").fetchall()
     conn.close()
-    return [r[0] for r in rows]
+    return sorted({r[0] for r in rows} | set(MAJOR_CITIES))
+
+
+def route_kind(origin, destination):
+    """"direct", "connecting" (one stop) or None when the data has no route between the two cities."""
+    if get_transport_options(origin, destination):
+        return "direct"
+    return "connecting" if get_connecting_options(origin, destination) else None
 
 
 def search_hotels(city, max_nightly_price=None):

@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from backend.database import (initialize_database, search_hotels, list_cities, list_origin_cities, refresh_data,
                               describe_rejection, list_trips, delete_trip, effective_confidence, CONFIDENCE_LEVELS,
-                              DATA_DIR)
+                              route_kind, DATA_DIR)
 from backend.planner import build_budget_plan, save_plan, summarize_trip
 from backend.agent import run_agent
 from backend.owners import (admin_password_configured, check_admin_password, create_hotel, create_owner, delete_owner,
@@ -67,7 +67,9 @@ def show_plan(result, key="plan"):
 with st.sidebar:
     st.header("Plan a trip")
     destination = st.selectbox("Destination", list_cities())
-    origin = st.selectbox("Starting city", [c for c in list_origin_cities() if c != destination])
+    origins = [c for c in list_origin_cities() if c != destination]
+    route_notes = {None: " (no fare data yet)", "direct": "", "connecting": " (via a connection)"}
+    origin = st.selectbox("Starting city", origins, format_func=lambda c: c + route_notes[route_kind(c, destination)])
     budget = st.number_input("Total budget (PKR)", min_value=1000, max_value=1000000, value=30000, step=1000)
     nights = st.number_input("Nights", min_value=1, max_value=30, value=2, step=1)
     group_size = st.number_input("Travelers", min_value=1, max_value=20, value=2, step=1)
